@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PhishGuard — URL Safety Checker</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
+</head>
+<body>
+
+  <div class="layout">
+
+    <!-- HEADER -->
+    <header class="header">
+      <div class="logo">
+        <span class="logo-icon">⬡</span>
+        <span class="logo-text">PhishGuard</span>
+      </div>
+      <span class="logo-sub">ML-powered URL analysis</span>
+    </header>
+
+    <!-- HERO INPUT -->
+    <main class="main">
+      <div class="hero">
+        <h1 class="hero-title">Is this URL safe?</h1>
+        <p class="hero-sub">Paste any link — our Random Forest model analyzes 44 behavioral signals in seconds.</p>
+
+        <div class="input-wrap">
+          <span class="input-prefix">URL</span>
+          <input
+            type="text"
+            id="urlInput"
+            class="url-input"
+            placeholder="https://example.com"
+            autocomplete="off"
+            spellcheck="false"
+            onkeydown="if(event.key==='Enter') checkURL()"
+          />
+          <button class="check-btn" id="checkBtn" onclick="checkURL()">
+            <span id="btnLabel">Analyze</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- LOADING -->
+      <div id="loading" class="loading hidden">
+        <div class="scan-bar">
+          <div class="scan-fill"></div>
+        </div>
+        <p class="loading-text">Rendering page & extracting features<span class="dots"></span></p>
+      </div>
+
+      <!-- RESULT CARD -->
+      <div id="resultCard" class="result-card hidden">
+
+        <div class="verdict-row">
+          <div id="verdictBadge" class="verdict-badge"></div>
+          <div class="verdict-meta">
+            <div id="verdictURL" class="verdict-url"></div>
+            <div id="verdictTime" class="verdict-time"></div>
+          </div>
+        </div>
+
+        <!-- Dual probability bar -->
+        <div class="prob-section">
+          <div class="prob-row">
+            <span class="prob-label legit-label">Legitimate</span>
+            <div class="prob-track">
+              <div id="barLegit" class="prob-bar bar-legit"></div>
+            </div>
+            <span id="pctLegit" class="prob-pct"></span>
+          </div>
+          <div class="prob-row">
+            <span class="prob-label phish-label">Phishing</span>
+            <div class="prob-track">
+              <div id="barPhish" class="prob-bar bar-phish"></div>
+            </div>
+            <span id="pctPhish" class="prob-pct"></span>
+          </div>
+        </div>
+
+        <!-- Risk meter -->
+        <div class="risk-meter">
+          <div id="riskIndicator" class="risk-indicator"></div>
+        </div>
+
+      </div>
+
+      <!-- FEATURE TABLE -->
+      <div id="featurePanel" class="feature-panel hidden">
+        <div class="feature-header">
+          <span class="feature-title">Feature Breakdown</span>
+          <span class="feature-count" id="featureCount"></span>
+          <button class="toggle-btn" onclick="toggleFeatures()" id="toggleBtn">Show</button>
+        </div>
+        <div id="featureTableWrap" class="feature-table-wrap hidden">
+          <table id="featureTable" class="feature-table">
+            <thead><tr><th>Feature</th><th>Value</th><th>Signal</th></tr></thead>
+            <tbody id="featureBody"></tbody>
+          </table>
+        </div>
+      </div>
+
+    </main>
+
+    <footer class="footer">
+      Random Forest · 44 features · PhiUSIIL dataset · 235,795 samples · 99.98% train accuracy
+    </footer>
+  </div>
+
+  <script>
+    let startTime;
+
+    // Features that lean phishing when high
+    const PHISH_SIGNALS = new Set([
+      "HasObfuscation","NoOfObfuscatedChar","ObfuscationRatio",
+      "NoOfEqualsInURL","NoOfQMarkInURL","NoOfAmpersandInURL",
+      "NoOfOtherSpecialCharsInURL","SpacialCharRatioInURL",
+      "IsDomainIP","NoOfURLRedirect","NoOfSelfRedirect",
+      "HasExternalFormSubmit","HasHiddenFields","HasPasswordField",
+      "NoOfPopup","NoOfiFrame","NoOfEmptyRef"
+    ]);
+
+    // Features that lean legit when present
+    const LEGIT_SIGNALS = new Set([
+      "IsHTTPS","HasTitle","HasDescription","HasFavicon",
+      "IsResponsive","Robots","HasCopyrightInfo","HasSocialNet",
+      "HasSubmitButton","NoOfSelfRef","NoOfImage","NoOfCSS","NoOfJS"
+    ]);
+
+    async function checkURL() {
+      const url = document.getElementById("urlInput").value.trim();
+      if (!url) { shake(); return; }
+
+      startTime = Date.now();
+      setLoading(true);
+      hide("resultCard");
+      hide("featurePanel");
+
+      try {
+        const res = await fetch("/predict", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ url }),
+        });
+        const data = await res.json();
+        if (data.error) { showError(data.error); return; }
+        showResult(data);
+      } catch (err) {
+        showError("Could not reach the server. Is Flask running?");
+      } finally {
+        setLoading(false);
+      }
+    }
+
+    function showResult(data) {
+      const elapsed   = ((Date.now() - startTime) / 1000).toFixed(1);
+      const isPhish   = data.prediction === 0;
+      const legitPct  = data.confidence.legitimate;
+      const phishPct  = data.confidence.phishing;
+
+      // Risk level
+      let risk, riskClass, badgeText;
+      if (!isPhish && legitPct >= 70) {
+        risk = "SAFE";        riskClass = "safe";   badgeText = "✓ SAFE";
+      } else if (!isPhish) {
+        risk = "SUSPICIOUS";  riskClass = "warn";   badgeText = "⚠ SUSPICIOUS";
+      } else {
+        risk = "DANGER";      riskClass = "danger"; badgeText = "✕ PHISHING";
+      }
+
+      // Badge
+      const badge = document.getElementById("verdictBadge");
+      badge.textContent  = badgeText;
+      badge.className    = `verdict-badge badge-${riskClass}`;
+
+      document.getElementById("verdictURL").textContent  = data.url;
+      document.getElementById("verdictTime").textContent = `analyzed in ${elapsed}s`;
+
+      // Probability bars (animate after paint)
+      setTimeout(() => {
+        document.getElementById("barLegit").style.width = legitPct + "%";
+        document.getElementById("barPhish").style.width = phishPct + "%";
+      }, 50);
+      document.getElementById("pctLegit").textContent = legitPct.toFixed(1) + "%";
+      document.getElementById("pctPhish").textContent = phishPct.toFixed(1) + "%";
+
+      // Risk indicator pill
+      const ri = document.getElementById("riskIndicator");
+      ri.textContent = risk;
+      ri.className   = `risk-indicator risk-${riskClass}`;
+
+      show("resultCard");
+      document.getElementById("resultCard").className = `result-card card-${riskClass}`;
+
+      // Feature table
+      buildFeatureTable(data.features);
+      document.getElementById("featureCount").textContent = `${Object.keys(data.features).length} features`;
+      show("featurePanel");
+    }
+
+    function buildFeatureTable(features) {
+      const tbody = document.getElementById("featureBody");
+      tbody.innerHTML = "";
+      const sorted = Object.entries(features).sort((a,b) => a[0].localeCompare(b[0]));
+      for (const [key, val] of sorted) {
+        const tr = tbody.insertRow();
+
+        const tdKey = tr.insertCell();
+        tdKey.className = "td-key";
+        tdKey.textContent = key;
+
+        const tdVal = tr.insertCell();
+        tdVal.className = "td-val mono";
+        tdVal.textContent = typeof val === "number" && !Number.isInteger(val)
+          ? val.toFixed(4) : val;
+
+        const tdSig = tr.insertCell();
+        const numVal = Number(val);
+        if (PHISH_SIGNALS.has(key) && numVal > 0) {
+          tdSig.innerHTML = '<span class="sig sig-phish">↑ phish</span>';
+        } else if (LEGIT_SIGNALS.has(key) && numVal > 0) {
+          tdSig.innerHTML = '<span class="sig sig-legit">↑ legit</span>';
+        } else {
+          tdSig.innerHTML = '<span class="sig sig-neutral">—</span>';
+        }
+      }
+    }
+
+    function toggleFeatures() {
+      const wrap = document.getElementById("featureTableWrap");
+      const btn  = document.getElementById("toggleBtn");
+      const hidden = wrap.classList.toggle("hidden");
+      btn.textContent = hidden ? "Show" : "Hide";
+    }
+
+    function showError(msg) {
+      const card = document.getElementById("resultCard");
+      card.className = "result-card card-error";
+      document.getElementById("verdictBadge").textContent = "✕ ERROR";
+      document.getElementById("verdictBadge").className   = "verdict-badge badge-danger";
+      document.getElementById("verdictURL").textContent   = msg;
+      document.getElementById("verdictTime").textContent  = "";
+      document.getElementById("barLegit").style.width     = "0%";
+      document.getElementById("barPhish").style.width     = "0%";
+      document.getElementById("pctLegit").textContent     = "";
+      document.getElementById("pctPhish").textContent     = "";
+      document.getElementById("riskIndicator").textContent = "";
+      show("resultCard");
+    }
+
+    function setLoading(on) {
+      document.getElementById("loading").classList.toggle("hidden", !on);
+      document.getElementById("checkBtn").disabled = on;
+      document.getElementById("btnLabel").textContent = on ? "Analyzing…" : "Analyze";
+    }
+
+    function shake() {
+      const inp = document.getElementById("urlInput");
+      inp.classList.add("shake");
+      setTimeout(() => inp.classList.remove("shake"), 500);
+    }
+
+    function show(id) { document.getElementById(id).classList.remove("hidden"); }
+    function hide(id) { document.getElementById(id).classList.add("hidden"); }
+  </script>
+</body>
+</html>
