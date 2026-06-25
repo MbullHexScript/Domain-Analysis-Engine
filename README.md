@@ -1,4 +1,4 @@
-# Domain Analysis Engine!!!
+# Domain Analysis Engine
 
 ## Project Overview
 
